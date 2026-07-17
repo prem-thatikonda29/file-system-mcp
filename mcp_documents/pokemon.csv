@@ -1,0 +1,11 @@
+Pokedex,Name,PrimaryType,SecondaryType,Generation,HP,Attack,Defense
+001,Bulbasaur,Grass,Poison,1,45,49,49
+004,Charmander,Fire,,1,39,52,43
+007,Squirtle,Water,,1,44,48,65
+025,Pikachu,Electric,,1,35,55,40
+039,Jigglypuff,Normal,Fairy,1,115,45,20
+052,Meowth,Normal,,1,40,45,35
+133,Eevee,Normal,,1,55,55,50
+143,Snorlax,Normal,,1,160,110,65
+150,Mewtwo,Psychic,,1,106,110,90
+448,Lucario,Fighting,Steel,4,70,110,70

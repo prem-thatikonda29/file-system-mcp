@@ -1,0 +1,21 @@
+trainer:
+  name: Red
+  region: Kanto
+  badges: 8
+
+team:
+  - name: Pikachu
+    type:
+      - Electric
+    level: 58
+
+  - name: Charizard
+    type:
+      - Fire
+      - Flying
+    level: 62
+
+  - name: Snorlax
+    type:
+      - Normal
+    level: 55

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Pokedex>
+    <Pokemon id="25">
+        <Name>Pikachu</Name>
+        <Type>Electric</Type>
+        <Ability>Static</Ability>
+        <Region>Kanto</Region>
+    </Pokemon>
+
+    <Pokemon id="6">
+        <Name>Charizard</Name>
+        <Type>Fire</Type>
+        <Type>Flying</Type>
+        <Ability>Blaze</Ability>
+        <Region>Kanto</Region>
+    </Pokemon>
+</Pokedex>
