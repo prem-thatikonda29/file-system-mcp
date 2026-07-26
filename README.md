@@ -1,6 +1,6 @@
-# MCP CLI Chat
+# File System MCP
 
-A command-line chat application that uses the Model Context Protocol (MCP) to give an LLM the ability to manage documents on your filesystem. Ask questions, reference documents with `@`, and run commands like `/summarize` — all from your terminal.
+A CLI chat app that uses the Model Context Protocol (MCP) to let an LLM manage your filesystem. Ask questions, reference documents with `@`, and run commands like `/summarize` — all from your terminal.
 
 ## How It Works
 

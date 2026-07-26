@@ -1,7 +1,7 @@
 [project]
-name = "app"
+name = "file-system-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "A CLI chat app that uses MCP to let an LLM manage your filesystem"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
