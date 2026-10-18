@@ -87,7 +87,7 @@ Tab completion activates after typing `@`. The dropdown includes files from the 
 
 ### Commands
 
-Type `/` to see available commands. Commands take a document ID as the first argument:
+Type `/` to see available commands. The document commands take a document ID as the first argument:
 
 | Command | Syntax | Description |
 |---|---|---|
@@ -95,6 +95,7 @@ Type `/` to see available commands. Commands take a document ID as the first arg
 | `/format` | `/format <doc>` | Reformat a document to markdown |
 | `/rewrite` | `/rewrite <doc> <tone>` | Rewrite in a different tone (formal, casual, concise, technical, persuasive, simple) |
 | `/convert` | `/convert <doc> <format>` | Convert to another format (json, csv, markdown, yaml, xml, html, plain text) |
+| `/exit` | `/exit` | Exit the application (`/quit` and Ctrl-D also work) |
 
 ```
 > /summarize pokemon.md
@@ -123,22 +124,23 @@ python main.py my_server.py another_server.py
 
 ### File access permissions
 
-When you reference a file outside the allowed directories (`--roots` or default `mcp_documents/`), a permission prompt appears:
+Whenever anything touches a file outside the allowed directories (`--roots` or the default `mcp_documents/`), the server stops and asks you first. That includes files you `@mention`, `/commands`, and tool calls the LLM makes on its own:
 
 ```
 The MCP server wants to access:
 /Users/prem/Desktop/secret.txt
 This path is outside the allowed directories.
-Allow access? (1=Allow Once, 2=Always Allow, 3=Deny): 
+Allow access? (1=Allow once, 2=Always allow this file, 3=Always allow this folder, 4=Deny): 
 ```
 
-- **Allow Once (1)** — grants access for this single operation
-- **Always Allow (2)** — grants access for the rest of the session, and adds the parent directory to the allowed list so other files in the same folder are accessible via `@` without further prompts
-- **Deny (3)** — blocks access
+- **Allow once (1)**: allows just this one request. The next request for the same file asks again.
+- **Always allow this file (2)**: allows this file for the rest of the session. It also shows up in `@` tab completion.
+- **Always allow this folder (3)**: allows every file in the file's folder for the rest of the session, and adds them to `@` tab completion.
+- **Deny (4)**: blocks the request. Pressing Enter without a number, or Ctrl-C, also denies.
 
-After "Always Allow", the `@` tab-completion dropdown refreshes to include files from the newly allowed directory.
+How it works: the server asks using MCP [elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation), so the decision always comes from you, never from the LLM. There's no tool the LLM can call to grant itself access. Other MCP clients that support elicitation show their own version of this prompt. If a client can't ask the user, access outside the allowed directories is denied.
 
-Files are checked for existence before the permission prompt, so you won't be prompted for files that don't exist.
+You may be asked about a file that doesn't exist. That's deliberate: the server checks permission before it checks whether a file exists, so nothing outside the allowed directories can be probed without your approval.
 
 ## MCP Server
 
@@ -152,13 +154,12 @@ The built-in server (`mcp_server.py`) exposes:
 | `create_doc` | Create a new document |
 | `edit_doc_contents` | Replace text within a document |
 | `delete_doc` | Delete a document |
-| `allow_path` | Grant access to a file path (called by the client after permission is granted) |
 
 ### Resources
 
 | URI | Returns |
 |---|---|
-| `docs://list` | All filenames in the documents directory and any allowed directories |
+| `docs://list` | All filenames in the documents directory and any files or folders you've allowed |
 | `docs://recent` | 5 most recently modified files |
 | `docs://file/{filename}` | Contents of a specific file |
 
@@ -179,13 +180,22 @@ The built-in server (`mcp_server.py`) exposes:
 ├── mcp_server.py        # MCP server with tools, resources, prompts, and permission checks
 ├── core/
 │   ├── cli.py           # Terminal UI (prompt-toolkit, tab completion, key bindings)
-│   ├── cli_chat.py      # CLI chat logic (@mentions, /commands, permission handling)
+│   ├── cli_chat.py      # CLI chat logic (@mentions, /commands, access prompts)
 │   ├── chat.py          # Base chat loop (LLM ↔ tool execution cycle)
 │   ├── llm.py           # OpenAI API wrapper
 │   └── tools.py         # Converts MCP tools to OpenAI function-calling format
 ├── mcp_documents/       # Sample documents directory
+├── tests/               # Permission flow tests (run against the real server)
 ├── pyproject.toml       # Project metadata and dependencies
 └── .env                 # API keys and config
+```
+
+## Running tests
+
+The tests start the real MCP server and simulate the LLM's tool calls, so they don't need an API key:
+
+```bash
+uv run pytest
 ```
 
 ## Adding documents

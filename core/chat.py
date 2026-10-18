@@ -16,6 +16,16 @@ class Chat:
         self,
         query: str,
     ) -> str:
+        # If this turn fails partway, drop its messages so the next turn
+        # starts from a clean conversation
+        turn_start = len(self.messages)
+        try:
+            return await self._run_turn(query)
+        except BaseException:
+            del self.messages[turn_start:]
+            raise
+
+    async def _run_turn(self, query: str) -> str:
         final_text_response = ""
 
         await self._process_query(query)

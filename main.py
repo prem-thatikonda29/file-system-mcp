@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from mcp_client import MCPClient
 from core.llm import LLMService
 
-from core.cli_chat import CliChat
+from core.cli_chat import CliChat, cli_elicitation_callback
 from core.cli import CliApp
 
 load_dotenv()
@@ -54,14 +54,23 @@ async def main():
 
     async with AsyncExitStack() as stack:
         doc_client = await stack.enter_async_context(
-            MCPClient(command=command, args=cmd_args, roots=roots)
+            MCPClient(
+                command=command,
+                args=cmd_args,
+                roots=roots,
+                elicitation_callback=cli_elicitation_callback,
+            )
         )
         clients["doc_client"] = doc_client
 
         for i, server_script in enumerate(args.server_scripts):
             client_id = f"client_{i}_{server_script}"
             client = await stack.enter_async_context(
-                MCPClient(command="uv", args=["run", server_script])
+                MCPClient(
+                    command="uv",
+                    args=["run", server_script],
+                    elicitation_callback=cli_elicitation_callback,
+                )
             )
             clients[client_id] = client
 

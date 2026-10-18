@@ -4,6 +4,7 @@ from typing import Optional, Any
 from contextlib import AsyncExitStack
 from pathlib import Path
 from mcp import ClientSession, StdioServerParameters, types
+from mcp.client.session import ElicitationFnT
 from mcp.client.stdio import stdio_client
 from mcp.types import LoggingMessageNotificationParams, Root, ListRootsResult, ErrorData
 from mcp.shared.context import RequestContext
@@ -22,10 +23,12 @@ class MCPClient:
         args: list[str],
         env: Optional[dict] = None,
         roots: Optional[list[str]] = None,
+        elicitation_callback: Optional[ElicitationFnT] = None,
     ):
         self._command = command
         self._args = args
         self._env = env
+        self._elicitation_callback = elicitation_callback
         self._session: Optional[ClientSession] = None
         self._exit_stack: AsyncExitStack = AsyncExitStack()
         self._roots = self._create_roots(roots) if roots else []
@@ -64,6 +67,7 @@ class MCPClient:
               list_roots_callback=self._handle_list_roots
               if self._roots
               else None,
+              elicitation_callback=self._elicitation_callback,
             )
         )
         await self._session.initialize()

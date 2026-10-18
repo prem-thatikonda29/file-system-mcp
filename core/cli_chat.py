@@ -1,5 +1,7 @@
-from typing import List, Tuple
-from mcp.types import Prompt, PromptMessage
+from typing import Any, List, Tuple
+from mcp import ClientSession
+from mcp.shared.context import RequestContext
+from mcp.types import ElicitRequestParams, ElicitResult, Prompt, PromptMessage
 import re
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -8,6 +10,10 @@ from prompt_toolkit.styles import Style
 from core.chat import Chat
 from core.llm import LLMService
 from mcp_client import MCPClient
+
+
+class CommandError(Exception):
+    """A /command the user typed can't be run (unknown, or missing arguments)."""
 
 
 class CliChat(Chat):
@@ -35,51 +41,13 @@ class CliChat(Chat):
     ) -> list[PromptMessage]:
         return await self.doc_client.get_prompt(command, {"doc_id": doc_id})
 
-    async def _request_access(self, path: str) -> bool:
-        """Prompt user for access permission. Returns True if allowed."""
-        print(f"\nThe MCP server wants to access:\n{path}")
-        print("This path is outside the allowed directories.")
-
-        session = PromptSession(style=Style.from_dict({"prompt": "#aaaaaa"}))
-        choice = await session.prompt_async(
-            "Allow access? (1=Allow Once, 2=Always Allow, 3=Deny): "
-        )
-
-        choice = choice.strip()
-        if choice in ("1", "2"):
-            try:
-                await self.doc_client.call_tool("allow_path", {"path": path})
-            except Exception as e:
-                print(f"Failed to grant access: {e}")
-                return False
-            return True
-        return False
-
-    async def _call_tool_with_permissions(
-        self, tool_name: str, tool_input: dict
-    ) -> any:
-        """Call a tool, handling ACCESS_REQUIRED errors with permission prompts."""
-        result = await self.doc_client.call_tool(tool_name, tool_input)
-        if result and result.isError and result.content:
-            error_text = result.content[0].text
-            if "ACCESS_REQUIRED:" in error_text:
-                path = error_text.split("ACCESS_REQUIRED:", 1)[1]
-                if await self._request_access(path):
-                    return await self.doc_client.call_tool(tool_name, tool_input)
-        return result
-
-    async def _extract_resources(self, query: str) -> str:
-        # Find all @mentions — handle spaces in filenames by taking everything
-        # after @ until end of query or another @
-        raw_mentions = re.findall(r'@([^\s@]+(?:\s+[^\s@]+)*)', query)
-        # Strip trailing punctuation (?, ., ,, !, :, ;)
-        mentions = [re.sub(r'[?.!,:;]+$', '', m) for m in raw_mentions]
-
+    async def _extract_resources(self, mentions: list[str]) -> str:
         doc_ids = await self.list_docs_ids()
         mentioned_docs: list[Tuple[str, str]] = []
 
         for mention in mentions:
-            # Bare filename or path — read via tool (handles permission check)
+            # Bare filename or path. The server asks the user (via elicitation)
+            # if the path is outside the allowed directories.
             if mention in doc_ids or "/" in mention or mention.startswith("~"):
                 # For bare filenames, use the filename directly; for paths, resolve
                 if mention in doc_ids:
@@ -87,7 +55,7 @@ class CliChat(Chat):
                 else:
                     doc_id = str(Path(mention).expanduser().resolve())
                 try:
-                    result = await self._call_tool_with_permissions(
+                    result = await self.doc_client.call_tool(
                         "read_doc_contents", {"doc_id": doc_id}
                     )
                     if result and result.content and not result.isError:
@@ -107,15 +75,31 @@ class CliChat(Chat):
         return re.findall(pattern, query)
 
     async def _process_command(self, query: str) -> bool:
-        if not query.startswith("/"):
+        words = query.split()
+        # "/summarize ..." is a command; "/Users/me/notes.txt ..." is a path
+        if not query.startswith("/") or "/" in words[0][1:]:
             return False
 
-        words = query.split()
-        command = words[0].replace("/", "")
+        command = words[0][1:]
+        prompts = {p.name: p for p in await self.list_prompts()}
+        if command not in prompts:
+            available = ", ".join(f"/{name}" for name in prompts)
+            raise CommandError(f"Unknown command /{command}. Available: {available}")
 
-        messages = await self.doc_client.get_prompt(
-            command, {"doc_id": words[1]}
-        )
+        # Words fill the prompt's arguments in order; the last one takes the
+        # rest, so "/convert data.csv plain text" works
+        arguments = prompts[command].arguments or []
+        values = words[1:]
+        if len(arguments) > 1 and len(values) > len(arguments):
+            values = values[:len(arguments) - 1] + [" ".join(values[len(arguments) - 1:])]
+        args = {arg.name: value for arg, value in zip(arguments, values)}
+
+        missing = [arg.name for arg in arguments if arg.required and arg.name not in args]
+        if missing:
+            usage = " ".join(f"<{arg.name}>" for arg in arguments)
+            raise CommandError(f"Usage: /{command} {usage} (missing {', '.join(missing)})")
+
+        messages = await self.doc_client.get_prompt(command, args)
 
         self.messages += convert_prompt_messages_to_message_params(messages)
         return True
@@ -124,23 +108,19 @@ class CliChat(Chat):
         if await self._process_command(query):
             return
 
-        added_resources = await self._extract_resources(query)
+        mentions = parse_mentions(query, await self.list_docs_ids())
+        added_resources = await self._extract_resources(mentions)
 
-        # Detect file paths in the query and try to read them (triggers permission check)
-        # Skip paths already handled by _extract_resources
+        # Detect file paths in the query and try to read them (the server asks
+        # the user if needed). Skip paths already handled by _extract_resources
         file_paths = self._find_file_paths(query)
-        already_handled = set()
-        raw_mentions = re.findall(r'@([^\s@]+(?:\s+[^\s@]+)*)', query)
-        for m in raw_mentions:
-            clean = re.sub(r'[?.!,:;]+$', '', m)
-            if "/" in clean or clean.startswith("~"):
-                already_handled.add(clean)
+        already_handled = set(mentions)
 
         for file_path in file_paths:
             if file_path not in already_handled:
                 resolved = str(Path(file_path).expanduser().resolve())
                 try:
-                    result = await self._call_tool_with_permissions(
+                    result = await self.doc_client.call_tool(
                         "read_doc_contents", {"doc_id": resolved}
                     )
                     if result and result.content and not result.isError:
@@ -168,6 +148,67 @@ class CliChat(Chat):
         """
 
         self.llm_service.add_user_message(self.messages, prompt)
+
+
+def parse_mentions(query: str, doc_ids: list[str]) -> list[str]:
+    """Find @mentions in a query.
+
+    A mention is the longest known doc ID right after the "@" (so names with
+    spaces work), otherwise the next word with trailing punctuation stripped.
+    An "@" inside a word (like an email address) is not a mention.
+    """
+    mentions = []
+    for match in re.finditer(r'(?:^|(?<=\s))@', query):
+        rest = query[match.end():]
+        known = [d for d in doc_ids if rest.startswith(d)]
+        if known:
+            mentions.append(max(known, key=len))
+            continue
+        word = re.match(r'[^\s@]+', rest)
+        if word:
+            mentions.append(re.sub(r'[?.!,:;]+$', '', word.group()))
+    return mentions
+
+
+async def cli_elicitation_callback(
+    context: RequestContext[ClientSession, Any],
+    params: ElicitRequestParams,
+) -> ElicitResult:
+    """Ask the user to fill an MCP elicitation form in the terminal.
+
+    Used for the server's access prompts, but works for any form made of
+    choices (enum), yes/no (boolean) or free-text fields.
+    """
+    print(f"\n{params.message}")
+    if getattr(params, "mode", "form") != "form":
+        print("(This client can't open URLs, declining.)")
+        return ElicitResult(action="decline")
+
+    session = PromptSession(style=Style.from_dict({"prompt": "#aaaaaa"}))
+    content: dict[str, Any] = {}
+    try:
+        for name, prop in params.requestedSchema.get("properties", {}).items():
+            title = prop.get("title", name)
+            if "enum" in prop:
+                choices = prop["enum"]
+                labels = prop.get("enumNames", choices)
+                options = ", ".join(f"{i}={label}" for i, label in enumerate(labels, 1))
+                deny = len(choices) + 1
+                answer = (await session.prompt_async(
+                    f"{title}? ({options}, {deny}=Deny): "
+                )).strip()
+                if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+                    return ElicitResult(action="decline")
+                content[name] = choices[int(answer) - 1]
+            elif prop.get("type") == "boolean":
+                answer = (await session.prompt_async(f"{title}? (y/n): ")).strip().lower()
+                content[name] = answer in ("y", "yes")
+            else:
+                content[name] = await session.prompt_async(f"{title}: ")
+    except (KeyboardInterrupt, EOFError):
+        return ElicitResult(action="cancel")
+
+    return ElicitResult(action="accept", content=content)
 
 
 def convert_prompt_message_to_message_param(

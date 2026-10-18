@@ -1,4 +1,5 @@
 from typing import List, Optional
+import openai
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.key_binding import KeyBindings
@@ -8,7 +9,11 @@ from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from prompt_toolkit.document import Document
 from prompt_toolkit.buffer import Buffer
 
-from core.cli_chat import CliChat
+from core.cli_chat import CliChat, CommandError
+
+# Commands the CLI handles itself, before anything reaches the MCP server
+LOCAL_COMMANDS = {"exit": "Exit the application"}
+EXIT_COMMANDS = ("/exit", "/quit")
 
 
 class CommandAutoSuggest(AutoSuggest):
@@ -80,6 +85,14 @@ class UnifiedCompleter(Completer):
                             start_position=-len(cmd_prefix),
                             display=f"/{prompt.name}",
                             display_meta=prompt.description or "",
+                        )
+                for name, description in LOCAL_COMMANDS.items():
+                    if name.startswith(cmd_prefix):
+                        yield Completion(
+                            name,
+                            start_position=-len(cmd_prefix),
+                            display=f"/{name}",
+                            display_meta=description,
                         )
                 return
 
@@ -200,10 +213,18 @@ class CliApp:
                 user_input = await self.session.prompt_async("> ")
                 if not user_input.strip():
                     continue
+                if user_input.strip().lower() in EXIT_COMMANDS:
+                    break
 
                 response = await self.agent.run(user_input)
                 print(f"\nResponse:\n{response}")
                 await self.refresh_resources()
 
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EOFError):
                 break
+            except CommandError as e:
+                print(f"\nError: {e}")
+            except openai.APIError as e:
+                print(f"\nError: {self.agent.llm_service.describe_error(e)}")
+            except Exception as e:
+                print(f"\nError: {type(e).__name__}: {e}")

@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.prompts import base
-from pydantic import Field
+from pydantic import BaseModel, Field
 import asyncio
 import os
 from pathlib import Path
@@ -8,9 +8,26 @@ from pathlib import Path
 
 mcp = FastMCP("DocumentMCP", log_level="ERROR")
 
-# Session state: paths and directories the user has approved for the entire session
+# Session state: paths and directories the user has approved for the entire session.
+# Only check_access() adds to these, and only after the user says yes via elicitation.
 allowed_paths: set[Path] = set()
 allowed_dirs: set[Path] = set()
+
+ACCESS_SCOPES = ["once", "file", "folder"]
+
+
+class AccessGrant(BaseModel):
+    """Form the client shows the user when a path is outside the allowed directories."""
+    scope: str = Field(
+        default="once",
+        title="Allow access",
+        description="once = just this request, file = this file for the session, "
+                    "folder = everything in this file's folder for the session",
+        json_schema_extra={
+            "enum": ACCESS_SCOPES,
+            "enumNames": ["Allow once", "Always allow this file", "Always allow this folder"],
+        },
+    )
 
 
 async def get_docs_dir(ctx: Context | None = None) -> Path:
@@ -28,46 +45,58 @@ async def get_docs_dir(ctx: Context | None = None) -> Path:
     return Path(os.path.expanduser("~/mcp_documents"))
 
 
-async def check_access(path: Path, ctx: Context) -> Path:
-    """Check if a path is accessible. Raises ValueError if outside roots."""
-    resolved = Path(os.path.expanduser(str(path))).resolve()
-
-    # Already explicitly allowed
+async def is_allowed(resolved: Path, ctx: Context) -> bool:
+    """True if a resolved path is under a root, the default docs dir, or a session grant."""
     if resolved in allowed_paths:
-        return resolved
+        return True
 
-    # Check if under any allowed directory
-    for allowed_dir in allowed_dirs:
-        try:
-            resolved.relative_to(allowed_dir)
-            return resolved
-        except ValueError:
-            continue
-
-    # Check if under any root
+    allowed_bases = set(allowed_dirs)
+    allowed_bases.add(Path("mcp_documents").resolve())
     try:
         roots_result = await ctx.session.list_roots()
         if roots_result and roots_result.roots:
-            for root in roots_result.roots:
-                root_path = Path(root.uri.path).resolve()
-                try:
-                    resolved.relative_to(root_path)
-                    return resolved
-                except ValueError:
-                    continue
+            allowed_bases.update(Path(root.uri.path).resolve() for root in roots_result.roots)
     except Exception:
         pass
 
-    # Check default local path
-    local_path = Path("mcp_documents").resolve()
-    try:
-        resolved.relative_to(local_path)
-        return resolved
-    except ValueError:
-        pass
+    return any(resolved.is_relative_to(base) for base in allowed_bases)
 
-    # Outside all roots — raise error with the path info for client to handle
-    raise PermissionError(f"ACCESS_REQUIRED:{resolved}")
+
+async def check_access(path: Path, ctx: Context) -> Path:
+    """Return the resolved path if accessible, asking the user when it's outside the roots.
+
+    Call this before checking whether the file exists, so callers can't use the
+    "not found" vs "denied" difference to probe paths outside the roots.
+    Raises PermissionError if the user declines or the client can't ask them.
+    """
+    resolved = Path(os.path.expanduser(str(path))).resolve()
+    if await is_allowed(resolved, ctx):
+        return resolved
+
+    try:
+        result = await ctx.elicit(
+            message=f"The MCP server wants to access:\n{resolved}\n"
+                    "This path is outside the allowed directories.",
+            schema=AccessGrant,
+        )
+    except Exception:
+        # Client doesn't support elicitation (or it failed): fail closed
+        raise PermissionError(
+            f"Access to {resolved} denied: it is outside the allowed directories and "
+            "the client can't ask the user. Restart with --roots to allow its folder."
+        )
+
+    if result.action != "accept":
+        raise PermissionError(f"The user denied access to {resolved}. Do not retry.")
+
+    scope = result.data.scope
+    if scope == "file":
+        allowed_paths.add(resolved)
+    elif scope == "folder":
+        allowed_dirs.add(resolved.parent)
+    elif scope != "once":
+        raise PermissionError(f"Access to {resolved} denied: unknown scope {scope!r}")
+    return resolved
 
 
 def get_doc_path(doc_id: str, docs_dir: Path) -> Path:
@@ -78,7 +107,10 @@ def get_doc_path(doc_id: str, docs_dir: Path) -> Path:
     default = docs_dir / doc_id
     if default.exists():
         return default
-    # Search allowed directories
+    # Search individually allowed files, then allowed directories
+    for p in allowed_paths:
+        if p.name == doc_id and p.exists():
+            return p
     for d in allowed_dirs:
         candidate = d / doc_id
         if candidate.exists():
@@ -87,16 +119,16 @@ def get_doc_path(doc_id: str, docs_dir: Path) -> Path:
     return default
 
 
-def read_doc_file(doc_id: str, docs_dir: Path) -> str:
-    path = get_doc_path(doc_id, docs_dir)
-    if not path.exists():
-        raise ValueError(f"Doc {doc_id} not found")
-    return path.read_text()
-
-
-def write_doc_file(doc_id: str, content: str, docs_dir: Path):
-    path = get_doc_path(doc_id, docs_dir)
-    path.write_text(content)
+def granted_files(docs_dir: Path) -> list[Path]:
+    """Files in the docs dir plus everything the user has allowed this session."""
+    files = []
+    if docs_dir.exists():
+        files.extend(f for f in docs_dir.iterdir() if f.is_file())
+    for d in allowed_dirs:
+        if d.exists() and d != docs_dir:
+            files.extend(f for f in d.iterdir() if f.is_file())
+    files.extend(p for p in allowed_paths if p.is_file() and p not in files)
+    return files
 
 
 # Tool to read a doc
@@ -110,9 +142,9 @@ async def read_document(
 ):
   docs_dir = await get_docs_dir(ctx)
   path = get_doc_path(doc_id, docs_dir)
+  path = await check_access(path, ctx)
   if not path.exists():
       raise ValueError(f"Doc {doc_id} not found")
-  path = await check_access(path, ctx)
 
   await ctx.info(f"Reading document: {doc_id}...")
   await ctx.report_progress(50, 100)
@@ -136,9 +168,9 @@ async def create_document(
 ):
   docs_dir = await get_docs_dir(ctx)
   path = get_doc_path(doc_id, docs_dir)
+  path = await check_access(path, ctx)
   if path.exists():
       raise ValueError(f"Doc {doc_id} already exists")
-  path = await check_access(path, ctx)
 
   await ctx.info(f"Creating document: {doc_id}...")
 
@@ -161,9 +193,9 @@ async def edit_document(
 ):
   docs_dir = await get_docs_dir(ctx)
   path = get_doc_path(doc_id, docs_dir)
+  path = await check_access(path, ctx)
   if not path.exists():
       raise ValueError(f"Doc {doc_id} not found")
-  path = await check_access(path, ctx)
 
   await ctx.info(f"Editing document: {doc_id}...")
 
@@ -190,29 +222,15 @@ async def delete_document(
 ):
   docs_dir = await get_docs_dir(ctx)
   path = get_doc_path(doc_id, docs_dir)
+  path = await check_access(path, ctx)
   if not path.exists():
       raise ValueError(f"Doc {doc_id} not found")
-  path = await check_access(path, ctx)
 
   await ctx.info(f"Deleting document: {doc_id}...")
   path.unlink()
 
   await ctx.info("Deleted.")
   return f"Deleted {doc_id}"
-
-
-@mcp.tool(
-  name="allow_path",
-  description="Grant the MCP server access to an absolute file path for this session"
-)
-async def allow_path(
-  path: str = Field(description="Absolute path to allow (e.g. /Users/me/Desktop/file.txt)"),
-):
-  resolved = Path(os.path.expanduser(path)).resolve()
-  allowed_paths.add(resolved)
-  # Also allow the parent directory so other files in the same folder are accessible
-  allowed_dirs.add(resolved.parent)
-  return f"Access granted for {resolved} (and directory {resolved.parent})"
 
 
 # Resource to return all files
@@ -222,15 +240,7 @@ async def allow_path(
 )
 async def list_files() -> list[str]:
   docs_dir = await get_docs_dir()
-  files = []
-  # Default docs directory
-  if docs_dir.exists():
-      files.extend(f.name for f in docs_dir.iterdir() if f.is_file())
-  # Additional allowed directories
-  for d in allowed_dirs:
-      if d.exists() and d != docs_dir:
-          files.extend(f.name for f in d.iterdir() if f.is_file())
-  return files
+  return [f.name for f in granted_files(docs_dir)]
 
 
 # Resource to return recently modified files
@@ -240,14 +250,7 @@ async def list_files() -> list[str]:
 )
 async def list_recent() -> list[str]:
   docs_dir = await get_docs_dir()
-  files = []
-  # Default docs directory
-  if docs_dir.exists():
-      files.extend(f for f in docs_dir.iterdir() if f.is_file())
-  # Additional allowed directories
-  for d in allowed_dirs:
-      if d.exists() and d != docs_dir:
-          files.extend(f for f in d.iterdir() if f.is_file())
+  files = granted_files(docs_dir)
   files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
   return [f.name for f in files[:5]]
 
@@ -260,9 +263,9 @@ async def list_recent() -> list[str]:
 async def get_file_content(filename: str, ctx: Context) -> str:
   docs_dir = await get_docs_dir(ctx)
   path = get_doc_path(filename, docs_dir)
+  path = await check_access(path, ctx)
   if not path.exists():
       raise ValueError(f"Doc {filename} not found")
-  path = await check_access(path, ctx)
   return path.read_text()
 
 
